@@ -10,7 +10,7 @@ authors = [
     {name = "xor2003", email = "xor2003@gmx.com"},
 ]
 dependencies = ["pytest","coverage"]
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 readme = "README.md"
 license = {text = "GPL"}
 keywords = ["duplicate test detection","test optimization", "test efficiency"]
@@ -21,8 +21,9 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Testing :: Unit",
     "Operating System :: OS Independent",
     "Topic :: Software Development :: Quality Assurance"

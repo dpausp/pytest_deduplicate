@@ -2,23 +2,20 @@
 import logging
 import os
 import sys
+import hashlib
 from copy import copy
 from dataclasses import dataclass
-from typing import Optional
 
 import pytest
-from _pytest.unittest import TestCaseFunction
 from coverage import Coverage
-from coverage.data import add_data_to_hash
-from coverage.misc import Hasher
 
 # from line_profiler_pycharm import profile
 
 Arc = tuple[int, int]
-Location = tuple[str, Optional[int], str]
+Location = tuple[str, int | None, str]
 
 
-@dataclass
+@dataclass(slots=True)
 class TestCoverage:
     """
     A class that represents the test coverage of a set of files.
@@ -33,8 +30,8 @@ class TestCoverage:
     >>> arc2 = Arc((2, 3))
     >>> arc3 = Arc((3, 4))
     >>> arc4 = Arc((4, 5))
-    >>> tc1 = TestCoverage([loc1], {"file1.py": {arc1, arc2}, "file2.py": {arc3}})
-    >>> tc2 = TestCoverage([loc2], {"file1.py": {arc2, arc4}, "file3.py": {arc4}})
+    >>> tc1 = TestCoverage(tests_locations=[loc1], file_arcs={"file1.py": {arc1, arc2}, "file2.py": {arc3}})
+    >>> tc2 = TestCoverage(tests_locations=[loc2], file_arcs={"file1.py": {arc2, arc4}, "file3.py": {arc4}})
     >>> len(tc1) # The number of arcs in the test coverage
     3
     >>> TestCoverage.union(tc1, tc2) # The union of two test coverages
@@ -51,7 +48,7 @@ class TestCoverage:
     True
     """
 
-    tests_locations: set[Location]
+    tests_locations: list[Location]
     file_arcs: dict[str, set[Arc]]
 
     def __len__(self):
@@ -83,7 +80,7 @@ class TestCoverage:
                     result_dict[filename] |= arcs_set
                 else:
                     result_dict[filename] = arcs_set.copy()
-        return TestCoverage([], result_dict)
+        return TestCoverage(tests_locations=set(), file_arcs=result_dict)
 
     def issubset(self, other):
         """
@@ -108,8 +105,10 @@ class TestCoverage:
         >>> tc4.issubset(tc4)
         True
         """
-        return all(file_set.issubset(other.file_arcs.get(filename, set()))
-                   for filename, file_set in self.file_arcs.items())
+        return all(
+            file_set.issubset(other.file_arcs.get(filename, set()))
+            for filename, file_set in self.file_arcs.items()
+        )
 
     def __and__(self, other):
         """
@@ -125,10 +124,13 @@ class TestCoverage:
         >>> bool(TestCoverage([], {}))
         False
         """
-        result_dict = {filename: and_
-                       for filename, file_set in self.file_arcs.items()
-                       if filename in other.file_arcs and (and_ := file_set & other.file_arcs[filename])}
-        return TestCoverage([], result_dict)
+        result_dict = {
+            filename: and_
+            for filename, file_set in self.file_arcs.items()
+            if filename in other.file_arcs
+            and (and_ := file_set & other.file_arcs[filename])
+        }
+        return TestCoverage(tests_locations=set(), file_arcs=result_dict)
 
     def __sub__(self, other):
         """
@@ -140,10 +142,12 @@ class TestCoverage:
         >>> tc_sub.file_arcs == {"file1.py": {Arc((1, 2))}, "file2.py": {Arc((3, 4))}}
         True
         """
-        result_dict = {filename: sub
-                       for filename, file_set in self.file_arcs.items()
-                       if (sub := file_set - other.file_arcs.get(filename, set()))}
-        return TestCoverage([], result_dict)
+        result_dict = {
+            filename: sub
+            for filename, file_set in self.file_arcs.items()
+            if (sub := file_set - other.file_arcs.get(filename, set()))
+        }
+        return TestCoverage(tests_locations=set(), file_arcs=result_dict)
 
 
 hash_tests: dict[str, TestCoverage] = {}
@@ -152,17 +156,17 @@ hash_tests: dict[str, TestCoverage] = {}
 class FindDuplicateCoverage:
     def __init__(self) -> None:
         self.collected: list[str] = []  # list to store collected test names
-        self.location: Optional[Location] = None  # the name of the current test
+        self.location: Location | None = None  # the name of the current test
         self.coverage = None  # Coverage object to measure code coverage
         self.skipped = False  # flag to track if the test is skipped
-        self.coverage = Coverage(branch=True, data_file=None,
-                                 omit=os.path.basename(__file__))  # initialize the Coverage object with branch coverage
-        # self.coverage = copy(self._coverage)
+        self.coverage = Coverage(
+            branch=True, data_file=None, omit=os.path.basename(__file__)
+        )  # initialize the Coverage object with branch coverage
 
     # @profile
     def pytest_collection_modifyitems(self, items: list) -> None:
         # append test name to the collected list
-        self.collected = [item.name for item in items if isinstance(item, TestCaseFunction)]
+        self.collected = [item.name for item in items if "test_" in item.name]
 
     # @profile
     def pytest_runtest_logstart(self, nodeid: str, location: Location) -> None:
@@ -186,7 +190,9 @@ class FindDuplicateCoverage:
         if report.when == "setup":
             self.start_collection()
         elif report.when == "call":
-            self.skipped = report.outcome == "skipped"  # set skipped flag based on test outcome
+            self.skipped = (
+                report.outcome == "skipped"
+            )  # set skipped flag based on test outcome
             logging.debug("Skipped %s", self.skipped)
         elif report.when == "teardown":
             self.stop_collection()
@@ -206,18 +212,24 @@ class FindDuplicateCoverage:
         if self.coverage and not self.skipped:
             try:
                 data = self.coverage.get_data()
-                hasher = Hasher()  # Hasher object to hash the coverage data
-                arcs_list = {}
+                arcs_list: dict[str, set[Arc]] = {}
                 for file_name in data.measured_files():
                     if os.path.basename(file_name).startswith("test_"):
                         continue
                     logging.debug(file_name)
-                    add_data_to_hash(data, file_name, hasher)
                     if arcs := set(data.arcs(file_name)):
                         arcs_list[file_name] = arcs
                 if not arcs_list:
                     logging.warning("Empty arcs for %s %s", self.location, arcs_list)
                     return
+
+                # Create a stable hash from the arcs
+                hasher = hashlib.sha256()
+                for filename in sorted(arcs_list.keys()):
+                    hasher.update(filename.encode())
+                    # Sort arcs for deterministic hashing
+                    for arc in sorted(arcs_list[filename]):
+                        hasher.update(f"{arc[0]},{arc[1]}".encode())
                 text_hash = hasher.hexdigest()
 
                 logging.debug(text_hash)
@@ -225,7 +237,9 @@ class FindDuplicateCoverage:
                 if text_hash in hash_tests:
                     hash_tests[text_hash].tests_locations.append(self.location)
                 else:
-                    hash_tests[text_hash] = TestCoverage(tests_locations=[self.location], file_arcs=arcs_list)
+                    hash_tests[text_hash] = TestCoverage(
+                        tests_locations=[self.location], file_arcs=arcs_list
+                    )
                 logging.debug("Coverage collected")
 
             except Exception:
@@ -234,7 +248,9 @@ class FindDuplicateCoverage:
         self.skipped = False
 
 
-def find_fully_overlapped_sets(list_of_sets: list[TestCoverage]) -> list[tuple[TestCoverage, list[TestCoverage]]]:
+def find_fully_overlapped_sets(
+    list_of_sets: list[TestCoverage],
+) -> list[tuple[TestCoverage, list[TestCoverage]]]:
     """Returns a list of sets that are fully overlapped by multiple sets."""
     sorted_sets = sorted(list_of_sets, key=len, reverse=True)
 
@@ -244,9 +260,11 @@ def find_fully_overlapped_sets(list_of_sets: list[TestCoverage]) -> list[tuple[T
         if not big_set.issubset(TestCoverage.union(*sorted_sets)):
             continue
         # prepare list of tests related to this and sort it by descending related arcs size
-        related_sets = sorted([other_set for other_set in sorted_sets if other_set & big_set],
-                              key=len,
-                              reverse=True)
+        related_sets = sorted(
+            [other_set for other_set in sorted_sets if other_set & big_set],
+            key=len,
+            reverse=True,
+        )
 
         big_set_ = copy(big_set)
 
@@ -289,7 +307,11 @@ def main():
         print("\n")
 
     for big_test, small_tests in find_fully_overlapped_sets(
-            [TestCoverage(cov.tests_locations, cov.file_arcs) for cov in hash_tests.values()]):
+        [
+            TestCoverage(cov.tests_locations, cov.file_arcs)
+            for cov in hash_tests.values()
+        ]
+    ):
         print('\n2. "God test" detected with broad coverage:')
         bigger_filename, bigger_linenum, bigger_test_name = big_test.tests_locations[0]
         print(
@@ -305,10 +327,14 @@ def main():
     for coverage_hash2, tests2 in hash_tests.items():
         items = []
         for coverage_hash1, tests1 in hash_tests.items():
-            if coverage_hash1 != coverage_hash2 and \
-                    set(tests2.file_arcs.keys()) >= set(tests1.file_arcs.keys()) and \
-                    all(arcs2_arcs >= tests1.file_arcs.get(arcs2_filename, set()) \
-                        for arcs2_filename, arcs2_arcs in tests2.file_arcs.items()):
+            if (
+                coverage_hash1 != coverage_hash2
+                and set(tests2.file_arcs.keys()) >= set(tests1.file_arcs.keys())
+                and all(
+                    arcs2_arcs >= tests1.file_arcs.get(arcs2_filename, set())
+                    for arcs2_filename, arcs2_arcs in tests2.file_arcs.items()
+                )
+            ):
                 items.extend(tests1.tests_locations)
         if not items:
             continue
@@ -327,6 +353,6 @@ def main():
 
 
 if __name__ == "__main__":
-    #import doctest
-    #doctest.testmod(verbose=True)
+    # import doctest
+    # doctest.testmod(verbose=True)
     main()
